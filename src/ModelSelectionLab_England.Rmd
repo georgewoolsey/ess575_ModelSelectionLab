@@ -146,9 +146,10 @@ bird.sm.df=bird.df[-idx.outlier,]
 X.1 = model.matrix(~as.numeric(scale(area)), data = bird.sm.df)
 X.2 = model.matrix(~as.numeric(scale(area)) + as.numeric(scale(temp)), data = bird.sm.df)
 y = bird.sm.df$species
-M1.list <- list(y=y, X=as.matrix(X.1), n=length(y), p=dim(X.1)[2])
-M2.list <- list(y=y, X=as.matrix(X.2), n=length(y), p=dim(X.2)[2])
+M1.list <- list(y=y, X=as.matrix(X.1), n=length(y), p=dim(X.1)[2]) # p = # of columns in matrix (# beta's)
+M2.list <- list(y=y, X=as.matrix(X.2), n=length(y), p=dim(X.2)[2]) # p = # of columns in matrix (# beta's)
 set.seed(7)
+
 ```
 
 # Question 1
@@ -200,6 +201,8 @@ x_1 &= \textrm{area}; x_2 = \textrm{temperature} \\
 
 Write the JAGS model statement and fit the model using both sets of covariates. Compute Bayesian p values for the mean and the standard deviation. Interpret the p values. What they tell you about the “do as I say, not as I do” nature of this exercise? What could you do to fix the problem?
 
+## JAGS Model
+
 ```{r, eval=FALSE}
 ## JAGS Model
 model{
@@ -208,14 +211,11 @@ model{
     beta[i] ~ dnorm(0, (1/10000)) # dnorm(mu = mean, tau= precision) 
   }
   # likelihood
-  for(i in 1:y){
+  # %*% is the symbol for matrix multiplication in JAGS and R.
+  b_x <- X %*% beta # the regression model in matrix form, returns a vector of length n
+  for(i in 1:n){
     # Deterministic model of y
-    lambda[i] <- exp(
-       b0
-       + b1*elevation[i]
-       + b2*(elevation[i]^2)
-       + b3*forestCover[i]
-    )
+    lambda[i] <- exp(b_x[i])
     # likelihood
       # Stochastic model of y
       y[i] ~ dpois(lambda[i])
@@ -236,3 +236,257 @@ model{
       p_val_sd <- step(sd_y_sim - sd_y)
 }
 ```
+
+## Implement JAGS Model
+
+```{r}
+## JAGS Model
+jags_model_txt <- "model{
+  # priors
+  for(i in 1:p){
+    beta[i] ~ dnorm(0, (1/10000)) # dnorm(mu = mean, tau= precision) 
+  }
+  # likelihood
+  # %*% is the symbol for matrix multiplication in JAGS and R.
+  b_x <- X %*% beta # the regression model in matrix form, returns a vector of length n
+  for(i in 1:n){
+    # Deterministic model of y
+    lambda[i] <- exp(b_x[i])
+    # likelihood
+      # Stochastic model of y
+      y[i] ~ dpois(lambda[i])
+      y_sim[i]  ~ dpois(lambda[i])
+  }
+  # Derived quantities
+    #posterior predictive checks
+      # test statistics y
+      mean_y <- mean(y)
+      sd_y <- sd(y)
+      
+      # test statistics y_sim
+      mean_y_sim <- mean(y_sim)
+      sd_y_sim <- sd(y_sim)
+      
+      # p-values
+      p_val_mean <- step(mean_y_sim - mean_y)
+      p_val_sd <- step(sd_y_sim - sd_y)
+}"
+#get DIC module for calculating deviance and DIC directly
+load.module("dic")
+set.seed(7)
+```
+
+### Model 1
+
+```{r}
+jags_model <- textConnection(jags_model_txt)
+################################################################
+# implement model
+##################################################################
+# specify the initial conditions for the MCMC chain 
+inits_1 = list(
+  beta = c(
+    mean(log(y))
+    , rep(0, dim(X.1)[2]-1)
+  ) 
+)
+# specify 3 scalars, n.adapt, n.update, and n.iter
+# n.adapt = number of iterations that JAGS will use to choose the sampler 
+  # and to assure optimum mixing of the MCMC chain
+n.adapt = 1000
+# n.update = number of iterations that will be discarded to allow the chain to 
+#   converge before iterations are stored (aka, burn-in)
+n.update = 3000
+# n.iter = number of iterations that will be stored in the 
+  # final chain as samples from the posterior distribution
+n.iter = 8000
+######################
+# Call to JAGS
+######################
+M1.model = rjags::jags.model(
+  file = jags_model
+  , data = M1.list
+  , inits = inits_1
+  , n.chains = length(inits_1)
+  , n.adapt = n.adapt
+)
+stats::update(M1.model, n.iter = n.update, progress.bar = "none")
+# save the coda object (more precisely, an mcmc.list object) to R as "zm"
+M1.out = rjags::coda.samples(
+  model = M1.model
+  , variable.names = c(
+      # parameters
+      "beta"
+      , "lambda"
+      # test statistics
+      , "mean_y"
+      , "sd_y"
+      , "mean_y_sim"
+      , "sd_y_sim"
+      # p-values
+      , "p_val_mean"
+      , "p_val_sd"
+      # deviance from DIC module
+      , "deviance"
+    )
+  , n.iter = n.iter
+  , n.thin = 1
+  , progress.bar = "none"
+)
+```
+
+
+#### Estimates of the $\boldsymbol{\beta}$ and DIC
+
+```{r}
+# summary
+MCMCvis::MCMCsummary(M1.out, params = c("beta", "deviance"))
+```
+
+#### Posterior predictive check - Test Statistics
+
+```{r}
+# summary
+MCMCvis::MCMCsummary(M1.out, params = c(
+      # test statistics
+      "mean_y"
+      , "mean_y_sim"
+      , "sd_y"
+      , "sd_y_sim"
+    )
+    , n.eff = FALSE
+  )
+```
+
+#### Posterior predictive check - p-values
+
+```{r}
+# summary
+MCMCvis::MCMCsummary(M1.out, params = c(
+      # p-values
+      "p_val_mean"
+      , "p_val_sd"
+    )
+  )
+```
+
+### Model 2
+
+```{r}
+jags_model <- textConnection(jags_model_txt)
+################################################################
+# implement model
+##################################################################
+# specify the initial conditions for the MCMC chain 
+inits_2 = list(
+  beta = c(
+    mean(log(y))
+    , rep(0, dim(X.2)[2]-1)
+  ) 
+)
+######################
+# Call to JAGS
+######################
+M2.model = rjags::jags.model(
+  file = jags_model
+  , data = M2.list
+  , inits = inits_2
+  , n.chains = length(inits_1)
+  , n.adapt = n.adapt
+)
+stats::update(M2.model, n.iter = n.update, progress.bar = "none")
+# save the coda object (more precisely, an mcmc.list object) to R as "zm"
+M2.out = rjags::coda.samples(
+  model = M2.model
+  , variable.names = c(
+      # parameters
+      "beta"
+      , "lambda"
+      # test statistics
+      , "mean_y"
+      , "sd_y"
+      , "mean_y_sim"
+      , "sd_y_sim"
+      # p-values
+      , "p_val_mean"
+      , "p_val_sd"
+      # deviance from DIC module
+      , "deviance"
+      # simulated data
+      , "y_sim"
+    )
+  , n.iter = n.iter
+  , n.thin = 1
+  , progress.bar = "none"
+)
+```
+
+
+#### Estimates of the $\boldsymbol{\beta}$ and DIC
+
+```{r}
+# summary
+MCMCvis::MCMCsummary(M2.out, params = c("beta", "deviance"))
+```
+
+#### Posterior predictive check - Test Statistics
+
+```{r}
+# summary
+MCMCvis::MCMCsummary(M2.out, params = c(
+      # test statistics
+      "mean_y"
+      , "mean_y_sim"
+      , "sd_y"
+      , "sd_y_sim"
+    )
+    , n.eff = FALSE
+  )
+```
+
+#### Posterior predictive check - p-values
+
+```{r}
+# summary
+MCMCvis::MCMCsummary(M2.out, params = c(
+      # p-values
+      "p_val_mean"
+      , "p_val_sd"
+    )
+  )
+```
+
+#### Plot simulated vs. observed data
+
+```{r}
+ggplot() + 
+  geom_histogram(
+    data = data.frame(y = M2.list$y)
+    , mapping = aes(x = y, y = ..density..)
+    , binwidth = 1
+    , color = "gray55"
+  ) +
+  geom_density(
+    data = data.frame(y_sim = MCMCchains(M2.out, "y_sim") %>% c())
+    , mapping = aes(x = y_sim, y = ..density..)
+    , linetype = 2
+    , lwd = 1.2
+    , color = "firebrick"
+  ) +
+  scale_x_continuous(
+    breaks = scales::extended_breaks(n=9)
+    , labels = scales::comma
+  ) +
+  xlab("# bird species") +
+  ylab("Density") +
+  labs(
+    title = "simulated (red) vs. observed data (gray)"
+  ) +
+  theme_bw()
+  
+```
+
+
+Both models failed posterior predictive checks for the standard deviation. A plot of the simulated data over a plot of a discrete histogram of the real data suggests that a simple, unimodal model like the Poisson is not up to the task. A mixture pf two distributions would likely be required. But this lab is about model selection so we will pretend that the model passed checks!
+
+
