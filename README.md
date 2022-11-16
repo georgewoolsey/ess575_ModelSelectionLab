@@ -1,1 +1,1 @@
-# ess575_ModelSelectionLab
+# ess575_JAGSProblemsLab

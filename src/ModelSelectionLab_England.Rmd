@@ -1,0 +1,238 @@
+---
+title: "ESS 575: Model Selection Lab"
+author: "Team England" 
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+linkcolor: blue
+header-includes:
+  - \usepackage{caption}
+  - \captionsetup[figure]{labelformat=empty}
+editor_options: 
+  chunk_output_type: console
+knit: (function(inputFile, encoding){ 
+    out_dir <- '../';
+    rmarkdown::render(inputFile, encoding = encoding, output_file=file.path(dirname(inputFile), out_dir, 'ModelSelectionLab_England.pdf')) 
+  })
+---
+
+Team England:
+
+  - Caroline Blommel
+  - Carolyn Coyle
+  - Bryn Crosby
+  - George Woolsey
+  
+cblommel@mail.colostate.edu, carolynm@mail.colostate.edu, brcrosby@rams.colostate.edu, george.woolsey@colostate.edu
+
+```{r setup, include=F}
+# knit options
+knitr::opts_chunk$set(
+  echo = TRUE
+  , warning = FALSE
+  , message = FALSE
+  , fig.height = 5
+  , fig.width = 7
+  , eval = TRUE
+  , fig.align='center'
+)
+```
+
+\newpage
+
+# Motivation
+
+There are a wide range of views about the value of model selection as a route to insight in science (e.g., Burnham and Anderson 2002, Gelman et al. 1995, Gelman et al. 2004, Gelman et al. 2013, Hobbs et al. 2012, Ver Hoef 2015, Gelman and Rubin 1995, Gelman and Shalizi 2013, Hooten and Hobbs 2015). Ecologists, particularly wildlife ecologists, have embraced the use of Akaike Information Criterion (AIC) to compare models, in part because it can be used with any likelihood-based model and has connections with the predictive ability of the model. AIC is not Bayesian (nor is BIC). Three Bayesian alternatives to AIC are DIC, WAIC, and Posterior Predictive Loss. They are only subtly different in their forumalation but usually lead to the same conclusions when comparing models. DIC and Posterior Predictive Loss are a good place to start learning about Bayesian model comparison because they do not require the assumption that data lack spatial or temporal structure, as with WAIC. See Hooten and Hobbs (2015) for details on the suite of other Bayesian model comparison approaches,
+
+As always, it will be valuable to have you lecture notes close at hand to understand the math that stands behind the code.
+
+## A Note About: Matrix Specification of Linear Models
+
+Specifying linear models in matrix notation is compact and convenient relative to writing out the full model as a scalar equation when there are several predictor variables. Consider the the typical, deterministic linear model:
+
+$$ 
+\mu_{i}=\beta_{0}+\beta_{1}x_{1i}+\beta_{2}x_{2i}
+$$
+
+It can be written in matrix form as:
+
+$$
+\pmb{\mu} = \pmb{X \beta}
+$$
+
+where $\pmb{\beta}$ is a column vector, $(\beta_0, \beta_1, \beta_2)'$ with length = number of model coefficients, and $\mathbf{X}$ is a *design* matrix with the number of rows equal to the number of data points and the number of columns equal to the number of predictor variables + 1 (so, in this example, 3).  Column one of $\mathbf{X}$ usually contains all 1s. Column two of $\mathbf{X}$ contains the covariate values of predictor variable 1, column three, predictor variable 2, and so on. The response variables are represented as $\mathbf{(y)}$, a vector of dimension $n \times 1$. If you are unfamiliar with matrix multiplication, ask one of the lab instructors to explain how this works.
+
+Matrix notation is handy because we can use a single JAGS file to specify several different models using the code below.
+
+```{r, eval=FALSE}
+ z <- X %*% beta # the regression model in matrix form, returns a vector of length n
+    for(i in 1:n)   { 
+    lambda[i] <- exp(z[i])
+    y[i] ~ dpois(lambda[i])
+}
+```
+
+Note that `%*%` is the symbol for matrix multiplication in JAGS and R.
+
+The reason this is so handy is the R function, `model.matrix()`, for creating a design matrix, i.e., the $\mathbf{(X)}$. Consider the following:
+
+```{r, eval=FALSE}
+X = model.matrix(~as.numeric(scale(area)) + as.numeric(scale(temp)), data = bird.sm.df)
+```
+
+This creates a design matrix with 1s in column one and standardized data for area and temperature in columns two and three using the data, `bird.sm.df`.
+
+## R libraries needed for this lab
+
+You need to load the following libraries. Set the seed to 10 to compare your answers to ours.
+
+```{r, eval=T}
+# bread-and-butter
+library(tidyverse)
+library(lubridate)
+library(viridis)
+library(scales)
+library(latex2exp)
+# visualization
+library(cowplot)
+library(kableExtra)
+# jags and bayesian
+library(rjags)
+library(MCMCvis)
+library(HDInterval)
+library(BayesNSF)
+#set seed
+set.seed(10)
+```
+ 
+\newpage
+
+# Problem
+
+We seek to model the response, bird species richness in 49 US states, using a set of predictor variables: area, temperature, and precipitation. Fit the following models and compare them using Deviance Information criterion (DIC) for each. Use a prior mean of 0 and variance of 100 for each regression coefficient (assuming independence}.
+
+1) Model 1: Intercept and area as covariate.
+
+2) Model 2: Intercept and area and temperature as covariates.
+
+The matrix parameterization allows us to fit the models using the same code, but different design matrices input as covariate data.
+
+## Load data
+
+The data for this problem is located in the `BayesNSF::RichnessBirds` data frame of the BayesNSF package. The species column give the number of different species of birds in a state.
+
+```{r}
+BayesNSF::RichnessBirds %>% 
+  dplyr::glimpse()
+
+```
+
+## Some preliminaries
+
+```{r}
+bird.df <- BayesNSF::RichnessBirds
+
+####
+####  Remove Outliers 
+####
+
+idx.outlier=(1:51)[(bird.df$species==min(bird.df$species) | bird.df$area==max(bird.df$area))]
+bird.sm.df=bird.df[-idx.outlier,]
+
+####  Setup Data to Fit Model 
+####  Below will make the full design matrix from a data frame.  Automatically makes the first column = 1 to allow for intercept.
+X.1 = model.matrix(~as.numeric(scale(area)), data = bird.sm.df)
+X.2 = model.matrix(~as.numeric(scale(area)) + as.numeric(scale(temp)), data = bird.sm.df)
+y = bird.sm.df$species
+M1.list <- list(y=y, X=as.matrix(X.1), n=length(y), p=dim(X.1)[2])
+M2.list <- list(y=y, X=as.matrix(X.2), n=length(y), p=dim(X.2)[2])
+set.seed(7)
+```
+
+# Question 1
+
+Write an expression for the posterior and joint distribution for the two models with pencil and paper. Use and exponential deterministic model. That said, what functional form might be more realistic if you want to consider the effect of area of a state on species richness?
+
+## Model 1
+
+### Deterministic model of $y$ (number of bird species):
+
+
+\begin{align*}
+y_{i}  &\sim {\sf Poisson} \bigl(g(\boldsymbol{\beta},x_i) \bigr) \\
+\lambda &= g(\boldsymbol{\beta},x_i) = \exp{\bigl(\beta_0 + \beta_1 x_{1i} \bigr)} \\
+x_1 &= \textrm{area} \\
+\end{align*}
+
+
+### Posterior and Joint:
+
+
+\begin{align*}
+\bigl[ \boldsymbol{\beta} \mid \boldsymbol{y} \bigr] &\propto \prod_{i=1}^{n=47} {\sf Poisson} \bigr( y_{i} \mid g(\boldsymbol{\beta,x_i}) \bigr) \\
+&\times \; {\sf normal} \bigr(\boldsymbol{\beta} \mid 0, 10000\bigr) \\ 
+\end{align*}
+
+
+## Model 2
+
+### Deterministic model of $y$ (number of bird species):
+
+
+\begin{align*}
+y_{i}  &\sim {\sf Poisson} \bigl(g(\boldsymbol{\beta}, \mathbf{X}) \bigr) \\
+\lambda &= g(\boldsymbol{\beta},\mathbf{X}) = \exp(\boldsymbol{\beta} \cdot \mathbf{X}) = \exp{\bigl(\beta_0 + \beta_1 x_{1i} + \beta_2 x_{2i} \bigr)} \\
+x_1 &= \textrm{area}; x_2 = \textrm{temperature} \\
+\end{align*}
+
+
+### Posterior and Joint:
+
+
+\begin{align*}
+\bigl[ \boldsymbol{\beta} \mid \boldsymbol{y} \bigr] &\propto \prod_{i=1}^{n=47} {\sf Poisson} \bigr( y_{i} \mid g(\boldsymbol{\beta}, \mathbf{X}) \bigr) \\
+&\times \; {\sf normal} \bigr(\boldsymbol{\beta} \mid 0, 10000\bigr) \\ 
+\end{align*}
+
+# Question 2
+
+Write the JAGS model statement and fit the model using both sets of covariates. Compute Bayesian p values for the mean and the standard deviation. Interpret the p values. What they tell you about the “do as I say, not as I do” nature of this exercise? What could you do to fix the problem?
+
+```{r, eval=FALSE}
+## JAGS Model
+model{
+  # priors
+  for(i in 1:p){
+    beta[i] ~ dnorm(0, (1/10000)) # dnorm(mu = mean, tau= precision) 
+  }
+  # likelihood
+  for(i in 1:y){
+    # Deterministic model of y
+    lambda[i] <- exp(
+       b0
+       + b1*elevation[i]
+       + b2*(elevation[i]^2)
+       + b3*forestCover[i]
+    )
+    # likelihood
+      # Stochastic model of y
+      y[i] ~ dpois(lambda[i])
+      y_sim[i]  ~ dpois(lambda[i])
+  }
+  # Derived quantities
+    #posterior predictive checks
+      # test statistics y
+      mean_y <- mean(y)
+      sd_y <- sd(y)
+      
+      # test statistics y_sim
+      mean_y_sim <- mean(y_sim)
+      sd_y_sim <- sd(y_sim)
+      
+      # p-values
+      p_val_mean <- step(mean_y_sim - mean_y)
+      p_val_sd <- step(sd_y_sim - sd_y)
+}
+```
